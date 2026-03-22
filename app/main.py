@@ -171,7 +171,7 @@ def load_model_without_quantization_config(model_path: Path):
         model_config = model_config.decode("utf-8")
 
     cleaned_config = remove_quantization_config(json.loads(model_config))
-    model = tf.keras.models.model_from_json(json.dumps(cleaned_config))
+    model = build_model_from_legacy_config(cleaned_config)
     model.load_weights(model_path)
     return model
 
@@ -190,6 +190,121 @@ def remove_quantization_config(config):
 
     walk(cleaned)
     return cleaned
+
+
+def build_model_from_legacy_config(model_config):
+    if model_config.get("class_name") != "Sequential":
+        raise ValueError("Only Sequential legacy models are supported.")
+
+    sequential_config = model_config["config"]
+    model = tf.keras.Sequential(name=sequential_config.get("name", "sequential"))
+
+    for layer in sequential_config.get("layers", []):
+        class_name = layer["class_name"]
+        config = layer["config"]
+
+        if class_name == "InputLayer":
+            batch_shape = config.get("batch_shape")
+            if not batch_shape or len(batch_shape) < 2:
+                raise ValueError("InputLayer batch_shape is missing from model config.")
+            model.add(
+                tf.keras.layers.InputLayer(
+                    input_shape=tuple(batch_shape[1:]),
+                    name=config.get("name"),
+                    dtype=deserialize_dtype(config.get("dtype")),
+                )
+            )
+        elif class_name == "Conv2D":
+            model.add(
+                tf.keras.layers.Conv2D(
+                    filters=config["filters"],
+                    kernel_size=tuple(config["kernel_size"]),
+                    strides=tuple(config.get("strides", [1, 1])),
+                    padding=config.get("padding", "valid"),
+                    data_format=config.get("data_format", "channels_last"),
+                    dilation_rate=tuple(config.get("dilation_rate", [1, 1])),
+                    groups=config.get("groups", 1),
+                    activation=config.get("activation"),
+                    use_bias=config.get("use_bias", True),
+                    kernel_initializer=deserialize_initializer(
+                        config.get("kernel_initializer")
+                    ),
+                    bias_initializer=deserialize_initializer(
+                        config.get("bias_initializer")
+                    ),
+                    name=config.get("name"),
+                    dtype=deserialize_dtype(config.get("dtype")),
+                    trainable=config.get("trainable", True),
+                )
+            )
+        elif class_name == "MaxPooling2D":
+            model.add(
+                tf.keras.layers.MaxPooling2D(
+                    pool_size=tuple(config.get("pool_size", [2, 2])),
+                    strides=tuple(config.get("strides", [2, 2])),
+                    padding=config.get("padding", "valid"),
+                    data_format=config.get("data_format", "channels_last"),
+                    name=config.get("name"),
+                )
+            )
+        elif class_name == "Flatten":
+            model.add(
+                tf.keras.layers.Flatten(
+                    data_format=config.get("data_format", "channels_last"),
+                    name=config.get("name"),
+                    dtype=deserialize_dtype(config.get("dtype")),
+                )
+            )
+        elif class_name == "Dense":
+            model.add(
+                tf.keras.layers.Dense(
+                    units=config["units"],
+                    activation=config.get("activation"),
+                    use_bias=config.get("use_bias", True),
+                    kernel_initializer=deserialize_initializer(
+                        config.get("kernel_initializer")
+                    ),
+                    bias_initializer=deserialize_initializer(
+                        config.get("bias_initializer")
+                    ),
+                    kernel_regularizer=tf.keras.regularizers.deserialize(
+                        config.get("kernel_regularizer")
+                    ),
+                    bias_regularizer=tf.keras.regularizers.deserialize(
+                        config.get("bias_regularizer")
+                    ),
+                    kernel_constraint=tf.keras.constraints.deserialize(
+                        config.get("kernel_constraint")
+                    ),
+                    bias_constraint=tf.keras.constraints.deserialize(
+                        config.get("bias_constraint")
+                    ),
+                    name=config.get("name"),
+                    dtype=deserialize_dtype(config.get("dtype")),
+                    trainable=config.get("trainable", True),
+                )
+            )
+        else:
+            raise ValueError(f"Unsupported layer type in legacy config: {class_name}")
+
+    build_input_shape = sequential_config.get("build_input_shape")
+    if build_input_shape:
+        model.build(tuple(build_input_shape))
+
+    return model
+
+
+def deserialize_dtype(dtype_config):
+    if isinstance(dtype_config, dict):
+        config = dtype_config.get("config", {})
+        return config.get("name")
+    return dtype_config
+
+
+def deserialize_initializer(initializer_config):
+    if initializer_config is None:
+        return None
+    return tf.keras.initializers.deserialize(initializer_config)
 
 
 def format_label(raw_label: str) -> str:
