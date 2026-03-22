@@ -1,7 +1,9 @@
 import json
 import os
 import tempfile
+from copy import deepcopy
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlretrieve
 
@@ -32,7 +34,12 @@ st.set_page_config(
 @st.cache_resource
 def load_model():
     model_path = resolve_model_path()
-    return tf.keras.models.load_model(model_path)
+    try:
+        return tf.keras.models.load_model(model_path, compile=False)
+    except (TypeError, ValueError) as error:
+        if "quantization_config" not in str(error):
+            raise
+        return load_model_without_quantization_config(model_path)
 
 
 @st.cache_data
@@ -98,7 +105,15 @@ def download_model_file(remote_url: str, destination: Path) -> None:
         gdown.download(remote_url, str(destination), quiet=False, fuzzy=True)
         return
 
-    urlretrieve(remote_url, destination)
+    try:
+        urlretrieve(remote_url, destination)
+    except HTTPError as error:
+        if error.code == 401:
+            raise PermissionError(
+                "Model download returned HTTP 401 Unauthorized. "
+                "Use a public direct-download URL or a public Hugging Face model file URL."
+            ) from error
+        raise
 
 
 def validate_model_file(model_path: Path) -> None:
@@ -112,6 +127,38 @@ def validate_model_file(model_path: Path) -> None:
             "If you are using Google Drive, make sure the file is shared as "
             "'Anyone with the link can view'."
         )
+
+
+def load_model_without_quantization_config(model_path: Path):
+    with h5py.File(model_path, "r") as model_file:
+        model_config = model_file.attrs.get("model_config")
+
+    if model_config is None:
+        raise ValueError("Could not find model_config in the H5 model file.")
+
+    if isinstance(model_config, bytes):
+        model_config = model_config.decode("utf-8")
+
+    cleaned_config = remove_quantization_config(json.loads(model_config))
+    model = tf.keras.models.model_from_json(json.dumps(cleaned_config))
+    model.load_weights(model_path)
+    return model
+
+
+def remove_quantization_config(config):
+    cleaned = deepcopy(config)
+
+    def walk(value):
+        if isinstance(value, dict):
+            value.pop("quantization_config", None)
+            for nested_value in value.values():
+                walk(nested_value)
+        elif isinstance(value, list):
+            for nested_value in value:
+                walk(nested_value)
+
+    walk(cleaned)
+    return cleaned
 
 
 def format_label(raw_label: str) -> str:
