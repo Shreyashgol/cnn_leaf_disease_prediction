@@ -2,12 +2,15 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from urllib.request import urlretrieve
 
 import numpy as np
 import streamlit as st
 import tensorflow as tf
+import h5py
 from PIL import Image
+import gdown
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -41,13 +44,32 @@ def load_class_names():
 def get_remote_model_url() -> str | None:
     secret_url = st.secrets.get("MODEL_URL")
     if secret_url:
-        return secret_url
+        return normalize_model_url(secret_url)
 
     env_url = os.getenv("MODEL_URL")
     if env_url:
-        return env_url
+        return normalize_model_url(env_url)
 
     return None
+
+
+def normalize_model_url(url: str) -> str:
+    parsed = urlparse(url)
+    if "drive.google.com" not in parsed.netloc:
+        return url
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if "file" in path_parts and "d" in path_parts:
+        file_id_index = path_parts.index("d") + 1
+        if file_id_index < len(path_parts):
+            file_id = path_parts[file_id_index]
+            return f"https://drive.google.com/uc?export=download&id={file_id}"
+
+    query_file_id = parse_qs(parsed.query).get("id", [None])[0]
+    if query_file_id:
+        return f"https://drive.google.com/uc?export=download&id={query_file_id}"
+
+    return url
 
 
 @st.cache_resource
@@ -64,9 +86,32 @@ def resolve_model_path() -> Path:
     CACHE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     if not CACHE_MODEL_PATH.exists():
         with st.spinner("Downloading model file for the first app startup..."):
-            urlretrieve(remote_url, CACHE_MODEL_PATH)
+            download_model_file(remote_url, CACHE_MODEL_PATH)
+
+    validate_model_file(CACHE_MODEL_PATH)
 
     return CACHE_MODEL_PATH
+
+
+def download_model_file(remote_url: str, destination: Path) -> None:
+    if "drive.google.com" in remote_url:
+        gdown.download(remote_url, str(destination), quiet=False, fuzzy=True)
+        return
+
+    urlretrieve(remote_url, destination)
+
+
+def validate_model_file(model_path: Path) -> None:
+    if not model_path.exists() or model_path.stat().st_size == 0:
+        raise FileNotFoundError("Model download failed or created an empty file.")
+
+    if not h5py.is_hdf5(model_path):
+        model_path.unlink(missing_ok=True)
+        raise ValueError(
+            "Downloaded file is not a valid H5 model. "
+            "If you are using Google Drive, make sure the file is shared as "
+            "'Anyone with the link can view'."
+        )
 
 
 def format_label(raw_label: str) -> str:
