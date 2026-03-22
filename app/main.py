@@ -7,12 +7,13 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlretrieve
 
+import gdown
+import h5py
 import numpy as np
+import requests
 import streamlit as st
 import tensorflow as tf
-import h5py
 from PIL import Image
-import gdown
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -56,6 +57,18 @@ def get_remote_model_url() -> str | None:
     env_url = os.getenv("MODEL_URL")
     if env_url:
         return normalize_model_url(env_url)
+
+    return None
+
+
+def get_model_download_token() -> str | None:
+    secret_token = st.secrets.get("MODEL_DOWNLOAD_TOKEN")
+    if secret_token:
+        return secret_token
+
+    env_token = os.getenv("MODEL_DOWNLOAD_TOKEN")
+    if env_token:
+        return env_token
 
     return None
 
@@ -105,15 +118,33 @@ def download_model_file(remote_url: str, destination: Path) -> None:
         gdown.download(remote_url, str(destination), quiet=False, fuzzy=True)
         return
 
+    download_token = get_model_download_token()
+    if download_token:
+        download_model_file_with_token(remote_url, destination, download_token)
+        return
+
     try:
         urlretrieve(remote_url, destination)
     except HTTPError as error:
         if error.code == 401:
             raise PermissionError(
                 "Model download returned HTTP 401 Unauthorized. "
-                "Use a public direct-download URL or a public Hugging Face model file URL."
+                "Use a public direct-download URL, or set MODEL_DOWNLOAD_TOKEN "
+                "for a protected host such as Hugging Face."
             ) from error
         raise
+
+
+def download_model_file_with_token(
+    remote_url: str, destination: Path, download_token: str
+) -> None:
+    headers = {"Authorization": f"Bearer {download_token}"}
+    with requests.get(remote_url, headers=headers, stream=True, timeout=300) as response:
+        response.raise_for_status()
+        with destination.open("wb") as output_file:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    output_file.write(chunk)
 
 
 def validate_model_file(model_path: Path) -> None:
@@ -200,8 +231,14 @@ st.write(
 )
 
 with st.expander("Model details"):
-    resolved_model_path = resolve_model_path()
-    st.write(f"Model file: `{resolved_model_path.name}`")
+    if MODEL_PATH.exists():
+        st.write(f"Model file: `{MODEL_PATH.name}`")
+        st.write("Model source: local project file")
+    elif get_remote_model_url():
+        st.write(f"Model file: `{MODEL_PATH.name}`")
+        st.write("Model source: remote download via `MODEL_URL`")
+    else:
+        st.write("Model source is not configured yet.")
     st.write("Input image size: `224 x 224`")
     st.write("Output classes: `38`")
 
